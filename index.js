@@ -26,7 +26,8 @@ const FTP_FLAT_UPLOAD = /^(1|true|yes)$/i.test(process.env.FTP_FLAT_UPLOAD || ''
 /** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם}
  *  ניתן לתת נתיב מוחלט עם "/" בתחילה כדי להתעלם מ-FTP_BASE_PATH.
  */
-const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages').replace(/\/+$/, '');
+const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages')
+  .replace(/\/+$/, '');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -178,6 +179,7 @@ async function uploadPreviewImageViaFtp(file) {
   const client = new FtpClient(60_000);
   await client.access({
     host: FTP_HOST,
+    base: FTP_BASE_PATH,
     port: FTP_PORT,
     user: FTP_USER,
     password: FTP_PASSWORD,
@@ -262,6 +264,7 @@ app.get('/test-connection', async (_, res) => {
       await client.access({
         host: FTP_HOST,
         port: FTP_PORT,
+        base: FTP_BASE_PATH,
         user: FTP_USER,
         password: FTP_PASSWORD,
         secure: FTP_SECURE,
