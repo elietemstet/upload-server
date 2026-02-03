@@ -23,6 +23,8 @@ const FTP_USE_SFTP = /^(1|true|yes)$/i.test(process.env.FTP_USE_SFTP || '');
 const FTP_SECURE = /^(1|true|yes)$/i.test(process.env.FTP_SECURE || '');
 const FTP_BASE_PATH = (process.env.FTP_BASE_PATH || '').replace(/\/+$/, '');
 const FTP_FLAT_UPLOAD = /^(1|true|yes)$/i.test(process.env.FTP_FLAT_UPLOAD || '');
+/** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם} */
+const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages').replace(/\/+$/, '');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -156,6 +158,74 @@ async function uploadViaSftp(files, category, gameName, key) {
   }
 }
 
+/** מעלה קובץ בודד (תמונת תצוגה) ל-assets/previewImages בשרת. */
+async function uploadPreviewImageViaFtp(file) {
+  const name = sanitize(file.originalname || file.name || 'preview.jpg');
+
+  const client = new FtpClient(60_000);
+  await client.access({
+    host: FTP_HOST,
+    port: FTP_PORT,
+    user: FTP_USER,
+    password: FTP_PASSWORD,
+    secure: FTP_SECURE,
+    secureOptions: { rejectUnauthorized: false },
+    allowSeparateTransferHost: false,
+    pasv: true,
+  });
+
+  try {
+    if (FTP_BASE_PATH) {
+      const parts = FTP_BASE_PATH.split('/').filter(Boolean);
+      for (const p of parts) {
+        await client.cd(p);
+      }
+    }
+    const previewParts = PREVIEW_IMAGES_REMOTE_PATH.split('/').filter(Boolean);
+    for (const p of previewParts) {
+      await client.ensureDir(p);
+      await client.cd(p);
+    }
+    const stream = Readable.from(file.buffer);
+    await client.uploadFrom(stream, name);
+  } finally {
+    client.close();
+  }
+  return name;
+}
+
+/** מעלה תמונת תצוגה ל-assets/previewImages ב-SFTP. */
+async function uploadPreviewImageViaSftp(file) {
+  const name = sanitize(file.originalname || file.name || 'preview.jpg');
+  const segments = [FTP_BASE_PATH, PREVIEW_IMAGES_REMOTE_PATH].filter(Boolean);
+  const pathParts = PREVIEW_IMAGES_REMOTE_PATH.split('/').filter(Boolean);
+  const fullPath = '/' + [...segments, name].join('/');
+
+  const sftp = new SftpClient();
+  await sftp.connect({
+    host: FTP_HOST,
+    port: FTP_PORT,
+    username: FTP_USER,
+    password: FTP_PASSWORD,
+  });
+
+  try {
+    let acc = '';
+    for (const p of [...(FTP_BASE_PATH ? FTP_BASE_PATH.split('/').filter(Boolean) : []), ...pathParts]) {
+      acc = acc ? acc + '/' + p : '/' + p;
+      try {
+        await sftp.mkdir(acc);
+      } catch (e) {
+        if (e.message && !/exist|already exists/i.test(String(e.message))) throw e;
+      }
+    }
+    await sftp.put(Buffer.from(file.buffer), fullPath);
+  } finally {
+    await sftp.end();
+  }
+  return name;
+}
+
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
@@ -210,7 +280,10 @@ app.get('/test-connection', async (_, res) => {
 });
 
 app.post('/upload', (req, res, next) => {
-  upload.array('files', 500)(req, res, (err) => {
+  upload.fields([
+    { name: 'files', maxCount: 500 },
+    { name: 'previewImage', maxCount: 1 },
+  ])(req, res, (err) => {
     if (err) {
       console.error('Multer error:', err);
       return res.status(400).json({
@@ -221,7 +294,24 @@ app.post('/upload', (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    const files = req.files || [];
+    const uploadType = (req.body?.uploadType || '').trim();
+    const isPreviewImage = uploadType === 'previewImage';
+    const previewFile = req.files?.previewImage?.[0];
+    const files = req.files?.files || [];
+
+    if (!FTP_HOST || !FTP_USER) {
+      return res.status(500).json({
+        error: 'חסר תצורת FTP. צור upload-server/.env עם FTP_HOST, FTP_USER, FTP_PASSWORD (אותם פרטים מ-FileZilla).',
+      });
+    }
+
+    if (isPreviewImage && previewFile) {
+      const filename = FTP_USE_SFTP
+        ? await uploadPreviewImageViaSftp(previewFile)
+        : await uploadPreviewImageViaFtp(previewFile);
+      return res.json({ ok: true, filename });
+    }
+
     const category = req.body?.category ?? '';
     const gameName = req.body?.gameName ?? '';
     let relativePaths;
@@ -233,11 +323,6 @@ app.post('/upload', (req, res, next) => {
       relativePaths = undefined;
     }
 
-    if (!FTP_HOST || !FTP_USER) {
-      return res.status(500).json({
-        error: 'חסר תצורת FTP. צור upload-server/.env עם FTP_HOST, FTP_USER, FTP_PASSWORD (אותם פרטים מ-FileZilla).',
-      });
-    }
     if (!category || !gameName) {
       return res.status(400).json({ error: 'נדרשים שדות category ו-gameName' });
     }
