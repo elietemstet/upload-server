@@ -21,13 +21,11 @@ const FTP_USER = process.env.FTP_USER || '';
 const FTP_PASSWORD = process.env.FTP_PASSWORD || '';
 const FTP_USE_SFTP = /^(1|true|yes)$/i.test(process.env.FTP_USE_SFTP || '');
 const FTP_SECURE = /^(1|true|yes)$/i.test(process.env.FTP_SECURE || '');
-const FTP_BASE_PATH = (process.env.FTP_BASE_PATH || '').replace(/\/+$/, '');
+
+// נתיבים נפרדים למשחקים ולתמונות
+const GAMES_BASE_PATH = (process.env.GAMES_BASE_PATH || 'public_html/games').replace(/\/+$/, '');
+const PREVIEW_IMAGES_BASE_PATH = (process.env.PREVIEW_IMAGES_BASE_PATH || 'public_html/assets/previewImages').replace(/\/+$/, '');
 const FTP_FLAT_UPLOAD = /^(1|true|yes)$/i.test(process.env.FTP_FLAT_UPLOAD || '');
-/** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם}
- *  ניתן לתת נתיב מוחלט עם "/" בתחילה כדי להתעלם מ-FTP_BASE_PATH.
- */
-const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages')
-  .replace(/\/+$/, '');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -49,17 +47,6 @@ function usePathAsIs(p) {
   return parts.join('/') || 'file';
 }
 
-function getPreviewBaseParts() {
-  const raw = String(PREVIEW_IMAGES_REMOTE_PATH || '').replace(/\\/g, '/');
-  const isAbsolute = raw.startsWith('/');
-  const parts = raw.replace(/^\/+/, '').split('/').filter(Boolean);
-  if (isAbsolute) {
-    return parts;
-  }
-  const baseParts = FTP_BASE_PATH ? FTP_BASE_PATH.split('/').filter(Boolean) : [];
-  return [...baseParts, ...parts];
-}
-
 function ftpErrorMsg(raw) {
   const s = String(raw || '').toLowerCase();
   if (/address lookup failed|getaddrinfo|unknown host|enotfound/i.test(s)) {
@@ -78,8 +65,8 @@ function ftpErrorMsg(raw) {
   }
   if (/550|no such file or directory|file unavailable/i.test(s)) {
     return (
-      'תיקייה לא נמצאה (550). וודא ש-FTP_BASE_PATH מצביע לתיקייה **קיימת** – צור אותה ב-FileZilla אם צריך. ' +
-      'למשל: צור תיקייה games בתוך public_html, אז הגדר FTP_BASE_PATH=games.'
+      'תיקייה לא נמצאה (550). וודא ש-GAMES_BASE_PATH מצביע לתיקייה **קיימת** – צור אותה ב-FileZilla אם צריך. ' +
+      'למשל: צור תיקייה games בתוך public_html, אז הגדר GAMES_BASE_PATH=public_html/games.'
     );
   }
   return raw;
@@ -100,24 +87,30 @@ async function uploadViaFtp(files, category, gameName, key, relativePaths) {
   });
 
   try {
-    if (FTP_BASE_PATH) {
-      const parts = FTP_BASE_PATH.split('/').filter(Boolean);
+    // עבור למסלול הבסיס של המשחקים
+    if (GAMES_BASE_PATH) {
+      const parts = GAMES_BASE_PATH.split('/').filter(Boolean);
       for (const p of parts) {
+        await client.ensureDir(p);
         await client.cd(p);
       }
     }
+
     if (FTP_FLAT_UPLOAD) {
+      // העלאה שטוחה - ישירות לתיקיית המשחקים
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         const rawPath = relativePaths?.[i];
         const name = f.originalname || f.name || 'file';
         const remotePath = rawPath ? usePathAsIs(rawPath) : sanitize(name);
         const stream = Readable.from(f.buffer);
+        
         if (remotePath.includes('/')) {
           const dir = remotePath.replace(/\/[^/]+$/, '');
           const baseName = remotePath.replace(/^.*\//, '');
           await client.ensureDir(dir);
           await client.uploadFrom(stream, baseName);
+          // חזור למיקום המקורי
           for (let k = 0; k < dir.split('/').length; k++) {
             await client.cd('..');
           }
@@ -126,8 +119,10 @@ async function uploadViaFtp(files, category, gameName, key, relativePaths) {
         }
       }
     } else {
+      // העלאה מסודרת - קטגוריה/שם_משחק/קבצים
       const relDir = [sanitize(category), sanitize(gameName)].join('/');
       await client.ensureDir(relDir);
+      
       for (const f of files) {
         const name = sanitize(f.originalname || f.name || 'file');
         const remote = relDir + '/' + name;
@@ -140,10 +135,7 @@ async function uploadViaFtp(files, category, gameName, key, relativePaths) {
   }
 }
 
-async function uploadViaSftp(files, category, gameName, key) {
-  const segments = [FTP_BASE_PATH, sanitize(category), sanitize(gameName)].filter(Boolean);
-  const base = segments.length ? '/' + segments.join('/') : '/';
-
+async function uploadViaSftp(files, category, gameName, key, relativePaths) {
   const sftp = new SftpClient();
   await sftp.connect({
     host: FTP_HOST,
@@ -153,8 +145,10 @@ async function uploadViaSftp(files, category, gameName, key) {
   });
 
   try {
+    // יצירת נתיב הבסיס
+    const baseParts = GAMES_BASE_PATH ? GAMES_BASE_PATH.split('/').filter(Boolean) : [];
     let acc = '';
-    for (const p of segments) {
+    for (const p of baseParts) {
       acc = acc ? acc + '/' + p : '/' + p;
       try {
         await sftp.mkdir(acc);
@@ -162,10 +156,53 @@ async function uploadViaSftp(files, category, gameName, key) {
         if (e.message && !/exist|already exists/i.test(String(e.message))) throw e;
       }
     }
-    for (const f of files) {
-      const name = sanitize(f.originalname || f.name || 'file');
-      const remote = base + '/' + name;
-      await sftp.put(Buffer.from(f.buffer), remote);
+
+    if (FTP_FLAT_UPLOAD) {
+      // העלאה שטוחה
+      const basePath = baseParts.length ? '/' + baseParts.join('/') : '/';
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const rawPath = relativePaths?.[i];
+        const name = f.originalname || f.name || 'file';
+        const remotePath = rawPath ? usePathAsIs(rawPath) : sanitize(name);
+        const fullPath = basePath + '/' + remotePath;
+        
+        // יצירת תיקיות אם יש נתיב מקונן
+        if (remotePath.includes('/')) {
+          const dirPath = remotePath.replace(/\/[^/]+$/, '');
+          const dirParts = dirPath.split('/').filter(Boolean);
+          let dirAcc = basePath;
+          for (const p of dirParts) {
+            dirAcc = dirAcc + '/' + p;
+            try {
+              await sftp.mkdir(dirAcc);
+            } catch (e) {
+              if (e.message && !/exist|already exists/i.test(String(e.message))) throw e;
+            }
+          }
+        }
+        
+        await sftp.put(Buffer.from(f.buffer), fullPath);
+      }
+    } else {
+      // העלאה מסודרת
+      const segments = [...baseParts, sanitize(category), sanitize(gameName)];
+      acc = '';
+      for (const p of segments) {
+        acc = acc ? acc + '/' + p : '/' + p;
+        try {
+          await sftp.mkdir(acc);
+        } catch (e) {
+          if (e.message && !/exist|already exists/i.test(String(e.message))) throw e;
+        }
+      }
+      
+      const base = '/' + segments.join('/');
+      for (const f of files) {
+        const name = sanitize(f.originalname || f.name || 'file');
+        const remote = base + '/' + name;
+        await sftp.put(Buffer.from(f.buffer), remote);
+      }
     }
   } finally {
     await sftp.end();
@@ -179,7 +216,6 @@ async function uploadPreviewImageViaFtp(file) {
   const client = new FtpClient(60_000);
   await client.access({
     host: FTP_HOST,
-    base: FTP_BASE_PATH,
     port: FTP_PORT,
     user: FTP_USER,
     password: FTP_PASSWORD,
@@ -190,23 +226,26 @@ async function uploadPreviewImageViaFtp(file) {
   });
 
   try {
-    const previewParts = getPreviewBaseParts();
+    // עבור לנתיב תמונות התצוגה
+    const previewParts = PREVIEW_IMAGES_BASE_PATH.split('/').filter(Boolean);
     for (const p of previewParts) {
       await client.ensureDir(p);
       await client.cd(p);
     }
+    
     const stream = Readable.from(file.buffer);
     await client.uploadFrom(stream, name);
   } finally {
     client.close();
   }
+  
   return name;
 }
 
 /** מעלה תמונת תצוגה ל-assets/previewImages ב-SFTP. */
 async function uploadPreviewImageViaSftp(file) {
   const name = sanitize(file.originalname || file.name || 'preview.jpg');
-  const previewParts = getPreviewBaseParts();
+  const previewParts = PREVIEW_IMAGES_BASE_PATH.split('/').filter(Boolean);
   const fullPath = '/' + [...previewParts, name].join('/');
 
   const sftp = new SftpClient();
@@ -218,6 +257,7 @@ async function uploadPreviewImageViaSftp(file) {
   });
 
   try {
+    // יצירת תיקיות
     let acc = '';
     for (const p of previewParts) {
       acc = acc ? acc + '/' + p : '/' + p;
@@ -227,10 +267,12 @@ async function uploadPreviewImageViaSftp(file) {
         if (e.message && !/exist|already exists/i.test(String(e.message))) throw e;
       }
     }
+    
     await sftp.put(Buffer.from(file.buffer), fullPath);
   } finally {
     await sftp.end();
   }
+  
   return name;
 }
 
@@ -264,7 +306,6 @@ app.get('/test-connection', async (_, res) => {
       await client.access({
         host: FTP_HOST,
         port: FTP_PORT,
-        base: FTP_BASE_PATH,
         user: FTP_USER,
         password: FTP_PASSWORD,
         secure: FTP_SECURE,
@@ -272,7 +313,15 @@ app.get('/test-connection', async (_, res) => {
       });
       client.close();
     }
-    return res.json({ ok: true, message: 'חיבור הצליח' });
+    return res.json({ 
+      ok: true, 
+      message: 'חיבור הצליח',
+      config: {
+        gamesPath: GAMES_BASE_PATH,
+        previewImagesPath: PREVIEW_IMAGES_BASE_PATH,
+        protocol: FTP_USE_SFTP ? 'SFTP' : 'FTP'
+      }
+    });
   } catch (err) {
     const raw = err?.message || String(err);
     console.error('Test connection error:', raw);
@@ -314,13 +363,21 @@ app.post('/upload', (req, res, next) => {
       });
     }
 
+    // העלאת תמונת תצוגה
     if (isPreviewImage && previewFile) {
       const filename = FTP_USE_SFTP
         ? await uploadPreviewImageViaSftp(previewFile)
         : await uploadPreviewImageViaFtp(previewFile);
-      return res.json({ ok: true, filename });
+      
+      console.log(`✓ תמונת תצוגה הועלתה: ${PREVIEW_IMAGES_BASE_PATH}/${filename}`);
+      return res.json({ 
+        ok: true, 
+        filename,
+        path: `${PREVIEW_IMAGES_BASE_PATH}/${filename}`
+      });
     }
 
+    // העלאת משחקים
     const category = req.body?.category ?? '';
     const gameName = req.body?.gameName ?? '';
     let relativePaths;
@@ -340,17 +397,21 @@ app.post('/upload', (req, res, next) => {
     }
 
     if (FTP_USE_SFTP) {
-      await uploadViaSftp(files, category, gameName, req.body?.key);
+      await uploadViaSftp(files, category, gameName, req.body?.key, relativePaths);
     } else {
       await uploadViaFtp(files, category, gameName, req.body?.key, relativePaths);
     }
 
+    const uploadPath = FTP_FLAT_UPLOAD
+      ? GAMES_BASE_PATH
+      : [GAMES_BASE_PATH, sanitize(category), sanitize(gameName)].join('/');
+
+    console.log(`✓ ${files.length} קבצים הועלו ל: ${uploadPath}`);
+
     res.json({
       ok: true,
       uploaded: files.length,
-      path: FTP_FLAT_UPLOAD
-        ? (FTP_BASE_PATH || '(root)')
-        : [FTP_BASE_PATH, sanitize(category), sanitize(gameName)].filter(Boolean).join('/'),
+      path: uploadPath,
     });
   } catch (err) {
     const raw = err?.message || String(err);
@@ -364,12 +425,16 @@ app.post('/upload', (req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Upload server: http://localhost:${PORT}`);
-  console.log(`FTP: ${FTP_USE_SFTP ? 'SFTP' : 'FTP'} ${FTP_HOST || '(לא הוגדר)'}:${FTP_PORT}`);
+  console.log(`🚀 Upload server: http://localhost:${PORT}`);
+  console.log(`📡 Protocol: ${FTP_USE_SFTP ? 'SFTP' : 'FTP'}`);
+  console.log(`🌐 Host: ${FTP_HOST || '(לא הוגדר)'}:${FTP_PORT}`);
+  console.log(`🎮 Games path: ${GAMES_BASE_PATH}`);
+  console.log(`🖼️  Preview images path: ${PREVIEW_IMAGES_BASE_PATH}`);
+  
   if (!FTP_HOST || !FTP_USER) {
-    console.warn('אזהרה: חסרה תצורת FTP. צור upload-server/.env עם FTP_HOST, FTP_USER, FTP_PASSWORD.');
+    console.warn('⚠️  אזהרה: חסרה תצורת FTP. צור upload-server/.env עם FTP_HOST, FTP_USER, FTP_PASSWORD.');
   }
   if (FTP_USE_SFTP && FTP_PORT === 21) {
-    console.warn('אזהרה: SFTP בדרך כלל משתמש בפורט 22. אם החיבור נכשל, נסה FTP_PORT=22.');
+    console.warn('⚠️  אזהרה: SFTP בדרך כלל משתמש בפורט 22. אם החיבור נכשל, נסה FTP_PORT=22.');
   }
 });
