@@ -26,7 +26,7 @@ const FTP_FLAT_UPLOAD = /^(1|true|yes)$/i.test(process.env.FTP_FLAT_UPLOAD || ''
 /** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם}
  *  ניתן לתת נתיב מוחלט עם "/" בתחילה כדי להתעלם מ-FTP_BASE_PATH.
  */
-const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'public_html/assets/previewImages').replace(/\/+$/, '');
+const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages').replace(/\/+$/, '');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
