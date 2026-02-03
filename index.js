@@ -23,8 +23,10 @@ const FTP_USE_SFTP = /^(1|true|yes)$/i.test(process.env.FTP_USE_SFTP || '');
 const FTP_SECURE = /^(1|true|yes)$/i.test(process.env.FTP_SECURE || '');
 const FTP_BASE_PATH = (process.env.FTP_BASE_PATH || '').replace(/\/+$/, '');
 const FTP_FLAT_UPLOAD = /^(1|true|yes)$/i.test(process.env.FTP_FLAT_UPLOAD || '');
-/** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם} */
-const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'assets/previewImages').replace(/\/+$/, '');
+/** נתיב תמונות תצוגה בשרת – נשמר ב-https://activehead.co.il/assets/previewImages/{שם}
+ *  ניתן לתת נתיב מוחלט עם "/" בתחילה כדי להתעלם מ-FTP_BASE_PATH.
+ */
+const PREVIEW_IMAGES_REMOTE_PATH = (process.env.PREVIEW_IMAGES_REMOTE_PATH || 'public_html/assets/previewImages').replace(/\/+$/, '');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -44,6 +46,17 @@ function usePathAsIs(p) {
     .split('/')
     .filter((s) => s !== '' && s !== '..');
   return parts.join('/') || 'file';
+}
+
+function getPreviewBaseParts() {
+  const raw = String(PREVIEW_IMAGES_REMOTE_PATH || '').replace(/\\/g, '/');
+  const isAbsolute = raw.startsWith('/');
+  const parts = raw.replace(/^\/+/, '').split('/').filter(Boolean);
+  if (isAbsolute) {
+    return parts;
+  }
+  const baseParts = FTP_BASE_PATH ? FTP_BASE_PATH.split('/').filter(Boolean) : [];
+  return [...baseParts, ...parts];
 }
 
 function ftpErrorMsg(raw) {
@@ -175,13 +188,7 @@ async function uploadPreviewImageViaFtp(file) {
   });
 
   try {
-    if (FTP_BASE_PATH) {
-      const parts = FTP_BASE_PATH.split('/').filter(Boolean);
-      for (const p of parts) {
-        await client.cd(p);
-      }
-    }
-    const previewParts = PREVIEW_IMAGES_REMOTE_PATH.split('/').filter(Boolean);
+    const previewParts = getPreviewBaseParts();
     for (const p of previewParts) {
       await client.ensureDir(p);
       await client.cd(p);
@@ -197,9 +204,8 @@ async function uploadPreviewImageViaFtp(file) {
 /** מעלה תמונת תצוגה ל-assets/previewImages ב-SFTP. */
 async function uploadPreviewImageViaSftp(file) {
   const name = sanitize(file.originalname || file.name || 'preview.jpg');
-  const segments = [FTP_BASE_PATH, PREVIEW_IMAGES_REMOTE_PATH].filter(Boolean);
-  const pathParts = PREVIEW_IMAGES_REMOTE_PATH.split('/').filter(Boolean);
-  const fullPath = '/' + [...segments, name].join('/');
+  const previewParts = getPreviewBaseParts();
+  const fullPath = '/' + [...previewParts, name].join('/');
 
   const sftp = new SftpClient();
   await sftp.connect({
@@ -211,7 +217,7 @@ async function uploadPreviewImageViaSftp(file) {
 
   try {
     let acc = '';
-    for (const p of [...(FTP_BASE_PATH ? FTP_BASE_PATH.split('/').filter(Boolean) : []), ...pathParts]) {
+    for (const p of previewParts) {
       acc = acc ? acc + '/' + p : '/' + p;
       try {
         await sftp.mkdir(acc);
