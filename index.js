@@ -179,7 +179,6 @@ async function uploadPreviewImageViaFtp(file) {
   const client = new FtpClient(60_000);
   await client.access({
     host: FTP_HOST,
-    base: FTP_BASE_PATH,
     port: FTP_PORT,
     user: FTP_USER,
     password: FTP_PASSWORD,
@@ -191,10 +190,8 @@ async function uploadPreviewImageViaFtp(file) {
 
   try {
     const previewParts = getPreviewBaseParts();
-    for (const p of previewParts) {
-      await client.ensureDir(p);
-      await client.cd(p);
-    }
+    const remotePath = previewParts.join('/');
+    await client.ensureDir(remotePath);
     const stream = Readable.from(file.buffer);
     await client.uploadFrom(stream, name);
   } finally {
@@ -264,7 +261,6 @@ app.get('/test-connection', async (_, res) => {
       await client.access({
         host: FTP_HOST,
         port: FTP_PORT,
-        base: FTP_BASE_PATH,
         user: FTP_USER,
         password: FTP_PASSWORD,
         secure: FTP_SECURE,
